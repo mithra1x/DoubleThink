@@ -296,8 +296,9 @@ def main(argv: list[str] | None = None) -> int:
     just_fix_windows_console()
     if typer and app is not None:
         command = typer.main.get_command(app)
+        args_list = argv if argv is not None else sys.argv[1:]
         try:
-            command.main(args=argv, prog_name="doublethink", standalone_mode=False)
+            command.main(args=args_list, prog_name="doublethink", standalone_mode=True)
         except SystemExit as exc:  # pragma: no cover - Click raises SystemExit
             return int(exc.code or 0)
         return 0
