@@ -1,29 +1,25 @@
 """Textual TUI for viewing DoubleThink analysis results."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List
+from typing import List
+from urllib.parse import parse_qs, urlparse
 
+from rich.align import Align
+from rich.console import Group
 from rich.panel import Panel
+from rich.progress_bar import ProgressBar as RichProgressBar
+from rich.rule import Rule as RichRule
 from rich.table import Table
 from rich.text import Text
 
-from .rules import AnalysisResult, RuleMatch
+from .rules import AnalysisResult
 
 try:  # pragma: no cover - import guard for optional UI dependency
     from textual.app import App, ComposeResult
-    from textual.containers import Container, Horizontal, VerticalScroll
-    from textual.widgets import DataTable, Footer, Header, Input, Static, Tab, Tabs
+    from textual.containers import VerticalScroll
+    from textual.widgets import Footer, Header, Static
 except Exception as exc:  # pragma: no cover - propagate for caller to handle
     raise RuntimeError("Textual dependency is required to render the interactive TUI") from exc
-
-
-@dataclass
-class _RuleRow:
-    """Helper data structure for table rows."""
-
-    key: str
-    match: RuleMatch
 
 
 def _severity_style(severity: str) -> str:
@@ -45,198 +41,215 @@ class DoubleThinkReportApp(App[None]):
         layout: vertical;
     }
 
-    #overview-panel, #meta-panel, #rules-layout {
+    #overview-scroll {
+        height: 1fr;
         padding: 1;
     }
 
-    #rules-layout {
-        layout: vertical;
-    }
-
-    #content-container {
-        height: 1fr;
-    }
-
-    #rules-panels {
-        layout: horizontal;
-        height: 1fr;
-    }
-
-    #left-panel {
-        width: 45%;
-    }
-
-    #rules-table, #rule-details {
-        height: 1fr;
-    }
-
-    #rule-details Static {
-        height: 1fr;
+    #overview-panel {
+        padding: 1;
     }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("f", "focus_search", "Focus search"),
     ]
 
     def __init__(self, result: AnalysisResult) -> None:
         super().__init__()
         self._result = result
-        self._all_rows: List[_RuleRow] = []
 
     def compose(self) -> ComposeResult:  # noqa: D401 - textual protocol
-        overview = Static(self._build_overview_panel(), id="overview-panel")
-        meta = Static(self._build_metadata_panel(), id="meta-panel")
-
-        rules_tab = Container(
-            Input(placeholder="Search title, id or message…", id="search"),
-            Horizontal(
-                Container(DataTable(id="rules-table"), id="left-panel"),
-                Container(
-                    VerticalScroll(Static(id="rule-details")),
-                    id="right-panel",
-                ),
-            id="rules-panels",
-            ),
-            id="rules-layout",
-        )
-
         yield Header(show_clock=False)
-        yield Tabs(
-            Tab("Overview", id="tab-overview"),
-            Tab("Rules", id="tab-rules"),
-            Tab("Metadata", id="tab-metadata"),
-            id="tabs",
-        )
-        yield Container(
-            overview,
-            rules_tab,
-            meta,
-            id="content-container",
+        yield VerticalScroll(
+            Static(self._build_overview_panel(), id="overview-panel"),
+            id="overview-scroll",
         )
         yield Footer()
 
-    def on_mount(self) -> None:
-        self._switch_panel("tab-overview")
-        table = self.query_one("#rules-table", DataTable)
-        table.cursor_type = "row"
-        table.zebra_stripes = True
-        table.add_columns("ID", "Title", "Weight", "Message")
-        self._all_rows = [
-            _RuleRow(key=f"rule-{index}", match=match)
-            for index, match in enumerate(self._result.matches)
-        ]
-        self._populate_table(self._all_rows)
-        if self._all_rows:
-            self._select_row(self._all_rows[0].key)
-            self._update_detail(self._all_rows[0].match)
-        else:
-            self._clear_detail("No rules were triggered.")
-
     def _build_overview_panel(self) -> Panel:
+        summary = self._build_summary_table()
+        risk_bar = self._build_risk_bar()
+        top_triggers = self._build_top_triggers_table()
+        url_breakdown = self._build_url_breakdown_table()
+        metadata = self._build_metadata_table()
+        red_flags = self._build_red_flags_badges()
+        actions = self._build_suggested_actions()
+
+        content = Group(
+            summary,
+            Align.left(Text("Risk level", style="bold")),
+            Align.left(risk_bar),
+            RichRule("Top triggers"),
+            top_triggers,
+            RichRule("URL breakdown"),
+            url_breakdown,
+            RichRule("Metadata"),
+            metadata,
+            RichRule("Red flags"),
+            red_flags,
+            RichRule("Suggested actions"),
+            actions,
+        )
+        return Panel(content, title="DoubleThink overview", border_style="cyan")
+
+    def _build_summary_table(self) -> Table:
+        verdict_text = self._verdict_badge()
         table = Table.grid(padding=(0, 1))
         table.add_row("Target", Text(self._result.target, style="bold"))
+        table.add_row("Verdict", verdict_text)
         table.add_row(
             "Score",
-            Text(f"{self._result.score} ({self._result.severity})", style=_severity_style(self._result.severity)),
+            Text(
+                f"{self._clamped_score()} / 100 ({self._result.severity.title()})",
+                style=_severity_style(self._result.severity),
+            ),
         )
-        table.add_row("Matches", str(len(self._result.matches)))
-        return Panel(table, title="Analysis Overview", border_style="cyan")
+        table.add_row("Triggered rules", str(len(self._result.matches)))
+        return table
 
-    def _build_metadata_panel(self) -> Panel:
+    def _build_risk_bar(self) -> RichProgressBar:
+        severity = self._normalized_severity()
+        color = {
+            "High": "red",
+            "Medium": "yellow",
+            "Low": "green",
+        }[severity]
+        return RichProgressBar(
+            total=100,
+            completed=self._clamped_score(),
+            complete_style=color,
+            finished_style=color,
+        )
+
+    def _build_top_triggers_table(self):
+        if not self._result.matches:
+            return Text("No rule triggers recorded.", style="dim")
+        sorted_matches = sorted(self._result.matches, key=lambda match: match.weight, reverse=True)
+        top_three = sorted_matches[:3]
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column("Rule", ratio=2, style="bold")
+        table.add_column("Weight", justify="right")
+        table.add_column("Why", ratio=3)
+        for match in top_three:
+            reason = match.message or match.description
+            table.add_row(match.title, str(match.weight), Text(reason, overflow="fold"))
+        return table
+
+    def _build_url_breakdown_table(self):
+        parsed = urlparse(self._result.target)
+        host = parsed.hostname or ""
+        registrable, subdomain = self._split_domain(host)
+        path_segments = [segment for segment in parsed.path.split("/") if segment]
+        query_params = parse_qs(parsed.query)
+
+        table = Table.grid(padding=(0, 1))
+        table.add_row("Scheme", parsed.scheme or "—")
+        table.add_row("Registrable domain", registrable or "—")
+        table.add_row("Subdomain", subdomain or "—")
+        table.add_row("Path segments", str(len(path_segments)))
+        table.add_row("Query parameters", str(sum(len(values) for values in query_params.values())))
+        return table
+
+    def _build_metadata_table(self):
         if not self._result.metadata:
-            return Panel(Text("No metadata provided.", style="dim"), title="Metadata", border_style="blue")
+            return Text("No metadata provided.", style="dim")
         table = Table.grid(padding=(0, 1))
         for key, value in self._result.metadata.items():
             table.add_row(Text(key, style="bold"), Text(str(value)))
-        return Panel(table, title="Metadata", border_style="blue")
+        return table
 
-    def _populate_table(self, rows: Iterable[_RuleRow]) -> None:
-        table = self.query_one("#rules-table", DataTable)
-        table.clear(columns=False)
-        for row in rows:
-            match = row.match
-            table.add_row(match.rule_id, match.title, str(match.weight), match.message, key=row.key)
-        if table.row_count:
-            table.move_cursor(row=0, column=0)
-        else:
-            self._clear_detail("No rules available.")
+    def _build_red_flags_badges(self):
+        flags = self._collect_red_flags()
+        if not flags:
+            return Text("No red flags detected.", style="dim")
+        text = Text()
+        for flag in flags:
+            text.append(f" {flag} ", style="bold white on red")
+            text.append(" ")
+        return text
 
-    def _select_row(self, key: str) -> None:
-        table = self.query_one("#rules-table", DataTable)
-        if table.row_count == 0:
-            return
-        for row_index, row_key in enumerate(table.rows.keys()):
-            if row_key == key:
-                table.move_cursor(row=row_index, column=0)
-                table.action_select_cursor()
-                break
-
-    def _update_detail(self, match: RuleMatch) -> None:
-        detail_table = Table.grid(padding=(0, 1))
-        detail_table.add_row("Rule", Text(match.title, style="bold"))
-        detail_table.add_row("Identifier", match.rule_id)
-        detail_table.add_row("Weight", str(match.weight))
-        detail_table.add_row("Description", match.description)
-        detail_table.add_row("Message", match.message)
-        if match.evidence:
-            detail_table.add_row("Evidence", match.evidence)
-
-        panel = Panel(detail_table, title="Rule details", border_style="magenta")
-        self.query_one("#rule-details", Static).update(panel)
-
-    def action_focus_search(self) -> None:
-        self.query_one("#search", Input).focus()
-
-    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
-        self._switch_panel(event.tab.id or "")
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "search":
-            return
-        term = event.value.strip().lower()
-        if not term:
-            filtered = self._all_rows
-        else:
-            filtered = [
-                row
-                for row in self._all_rows
-                if term in row.match.rule_id.lower()
-                or term in row.match.title.lower()
-                or term in row.match.message.lower()
-                or (row.match.evidence or "").lower().find(term) >= 0
+    def _build_suggested_actions(self):
+        severity = self._normalized_severity()
+        if severity == "High":
+            suggestions = [
+                "Do not enter credentials.",
+                "Open the target inside an isolated sandbox.",
+                "Verify hosting and WHOIS information before proceeding.",
             ]
-        self._populate_table(filtered)
-        if filtered:
-            self._select_row(filtered[0].key)
-            self._update_detail(filtered[0].match)
+        elif severity == "Medium":
+            suggestions = [
+                "Be cautious with any forms or credential prompts.",
+                "Open the link in a controlled environment first.",
+                "Validate the domain ownership if action is required.",
+            ]
         else:
-            self._clear_detail("No matches for current filter.")
+            suggestions = [
+                "Proceed carefully and monitor for unexpected redirects.",
+                "Capture a screenshot or recording for further review.",
+            ]
+        bullet_list = "\n".join(f"- {line}" for line in suggestions)
+        return Text(bullet_list)
 
-    def _switch_panel(self, tab_id: str) -> None:
-        mapping = {
-            "tab-overview": "overview-panel",
-            "tab-rules": "rules-layout",
-            "tab-metadata": "meta-panel",
-        }
-        target_id = mapping.get(tab_id)
-        container = self.query_one("#content-container", Container)
-        for widget in container.children:
-            widget.display = widget.id == target_id
+    def _verdict_badge(self) -> Text:
+        severity = self._normalized_severity()
+        color = {
+            "High": "red",
+            "Medium": "yellow",
+            "Low": "green",
+        }[severity]
+        return Text(f" {severity} ", style=f"bold white on {color}")
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:  # noqa: D401 - textual hook
-        key = event.row_key.value if event.row_key else None
-        if key is None:
-            return
-        for row in self._all_rows:
-            if row.key == key:
-                self._update_detail(row.match)
-                break
+    def _normalized_severity(self) -> str:
+        severity = self._result.severity.lower()
+        if severity in {"critical", "high"}:
+            return "High"
+        if severity == "medium":
+            return "Medium"
+        return "Low"
 
-    def _clear_detail(self, message: str) -> None:
-        panel = Panel(Text(message, style="dim"), title="Rule details", border_style="magenta")
-        self.query_one("#rule-details", Static).update(panel)
+    def _clamped_score(self) -> int:
+        return max(0, min(self._result.score, 100))
+
+    def _split_domain(self, host: str) -> tuple[str, str]:
+        parts = [segment for segment in host.split(".") if segment]
+        if len(parts) >= 2:
+            registrable = ".".join(parts[-2:])
+            subdomain = ".".join(parts[:-2])
+        else:
+            registrable = host
+            subdomain = ""
+        return registrable, subdomain
+
+    def _collect_red_flags(self) -> List[str]:
+        flags = set()
+        for match in self._result.matches:
+            blob = " ".join(
+                filter(
+                    None,
+                    [
+                        match.rule_id,
+                        match.title,
+                        match.message,
+                        match.description,
+                        match.evidence,
+                    ],
+                )
+            ).lower()
+            if any(keyword in blob for keyword in ("typo", "squat")):
+                flags.add("typosquat")
+            if "redirect" in blob:
+                flags.add("http-redirect")
+            if any(keyword in blob for keyword in ("credential", "password", "login")):
+                flags.add("credential-keyword")
+
+        metadata_blob = " ".join(str(value).lower() for value in self._result.metadata.values())
+        if "redirect" in metadata_blob:
+            flags.add("http-redirect")
+        if "credential" in metadata_blob:
+            flags.add("credential-keyword")
+
+        return sorted(flags)
 
 
 def run_textual_report(result: AnalysisResult) -> None:
