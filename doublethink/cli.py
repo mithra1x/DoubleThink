@@ -79,7 +79,7 @@ def _print_banner() -> None:
     console = Console()
     art = None
     if Figlet is not None:
-        # fərqli font sına: "slant", "ansi_shadow", "block", "standard"
+        # Try different fonts in order of preference.
         for f in ("slant", "ansi_shadow", "block", "standard"):
             try:
                 art = Figlet(font=f).renderText("DOUBLETHINK")
@@ -128,11 +128,11 @@ def _interactive_run() -> int:
         rulebook = _load_rulebook(None)
         if command == "url":
             if not _is_http_url(target):
-                raise ValueError("Tip uyğun deyil: URL modu üçün HTTP/HTTPS ünvanı daxil edin.")
+                raise ValueError("Type mismatch: provide an HTTP/HTTPS address for URL mode.")
             result = analyze_url(target, rulebook)
         else:
             if _is_http_url(target):
-                raise ValueError("Tip uyğun deyil: Fayl modu üçün yerli fayl yolu daxil edin.")
+                raise ValueError("Type mismatch: provide a local file path for file mode.")
             fp = Path(target)
             if not fp.exists():
                 (console.print(f"[red]File not found:[/] {fp}") if Console is not None else print(f"File not found: {fp}"))
