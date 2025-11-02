@@ -55,12 +55,10 @@ class DoubleThinkReportApp(App[None]):
 
     #rules-layout {
         layout: vertical;
-        gap: 1;
     }
 
     #rules-panels {
         layout: horizontal;
-        gap: 1;
         height: 1fr;
     }
 
