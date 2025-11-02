@@ -73,6 +73,26 @@ The `samples/` directory includes four ready-to-use examples that pair with
 Use `solution.md` as a script to explain why the analyzer flags each case and
 which rules trigger.
 
+## Web dashboard & API
+
+A small FastAPI backend and Streamlit dashboard are bundled for interactive
+demos:
+
+1. Launch the API (default port `8000`):
+
+   ```bash
+   uvicorn webapp.api:app --reload
+   ```
+
+2. In a separate terminal, start the dashboard:
+
+   ```bash
+   streamlit run webapp/dashboard.py
+   ```
+
+The dashboard surfaces rule-by-rule breakdowns as a table and bar chart, and it
+offers quick access to the bundled samples for live teaching sessions.
+
 ## Configuration
 
 Weights and descriptions for each detection rule live in `rules/weights.yml`.
