@@ -95,5 +95,5 @@ Key modules:
 - `doublethink/rules.py` – rule loading, scoring, and explainability helpers.
 
 ## License
-
+ 
 Distributed under the MIT License. See `LICENSE` for details.
